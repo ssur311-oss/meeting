@@ -455,9 +455,40 @@
     const KR_ONLY = new Set(['3·1절', '광복절', '개천절', '한글날', '현충일', '어린이날']);
     const holidayCache = new Map();
 
+    // 순서: ① 배포 사이트면 우리 서버 프록시(/api/holidays, 키는 서버에만) ② 내 컴퓨터면 config.js 키로 KOTRA
+    //       ③ 둘 다 안 되면 키가 필요 없는 Nager.Date
     async function fetchHolidays(country) {
       if (holidayCache.has(country)) return holidayCache.get(country);
-      if (typeof CONFIG === 'undefined' || !CONFIG.API_KEY) throw new Error('config.js 에 API_KEY 가 없어요');
+      if (/^https?:$/.test(location.protocol)) {
+        try { return await fetchProxy(country); } catch (e) { /* 프록시 실패 → 다음 방법으로 */ }
+      }
+      const hasKey = typeof CONFIG !== 'undefined' && CONFIG.API_KEY && CONFIG.API_KEY !== 'YOUR_API_KEY';
+      if (hasKey) {
+        try { return await fetchKotra(country); } catch (e) { /* KOTRA 실패 → Nager.Date 로 */ }
+      }
+      const days = {}, years = new Set();
+      if (!(await fillFromNager(country, days, years))) throw new Error('공휴일 서버에 연결하지 못했어요');
+      const result = { supported: Object.keys(days).length > 0, days, years: [...years] };
+      holidayCache.set(country, result);
+      return result;
+    }
+    async function fetchProxy(country) {
+      const res = await fetch('/api/holidays?country=' + encodeURIComponent(country), { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const { items } = await res.json();
+      const days = {}, years = new Set();
+      for (const it of items || []) {
+        const d = String(it.date || ''), name = String(it.name || '');
+        if (d.length !== 8 || (country !== 'KR' && KR_ONLY.has(name.trim()))) continue;
+        days[d.slice(0, 4) + '-' + d.slice(4, 6) + '-' + d.slice(6, 8)] = name;
+        years.add(+d.slice(0, 4));
+      }
+      if (!Object.keys(days).length) await fillFromNager(country, days, years);
+      const result = { supported: Object.keys(days).length > 0, days, years: [...years] };
+      holidayCache.set(country, result);
+      return result;
+    }
+    async function fetchKotra(country) {
 
       const url = KOTRA_URL + '?serviceKey=' + encodeURIComponent(CONFIG.API_KEY) + '&type=json&numOfRows=100&pageNo=1&search1=' + encodeURIComponent(country);
       // 공공데이터포털이 가끔 일시적으로 5xx를 주므로 한 번만 다시 시도한다
@@ -486,16 +517,20 @@
       return result;
     }
 
+    // 서버에 닿았으면 true (204 = 그 나라 데이터 없음도 정상)
     async function fillFromNager(country, days, years) {
       const thisYear = new Date().getFullYear();
+      let reached = false;
       for (const y of [thisYear, thisYear + 1]) {
         try {
           const res = await fetch('https://date.nager.at/api/v3/PublicHolidays/' + y + '/' + country, { signal: AbortSignal.timeout(8000) });
+          if (res.ok) reached = true;
           if (!res.ok || res.status === 204) continue;
           for (const h of await res.json()) days[h.date] = h.localName || h.name;
           years.add(y);
-        } catch (e) { /* 보충 실패는 무시: 공휴일 없음으로 처리 */ }
+        } catch (e) { /* 이 연도는 건너뛰어요 */ }
       }
+      return reached;
     }
 
     // ───────── 시간대 계산 (브라우저 내장 Intl 사용) ─────────
@@ -1515,6 +1550,7 @@
     // 추가·변경된 번역 (뒤에 오는 값이 앞의 값을 덮어써요)
     const I18N_EXTRA = {
       "ko": {
+        "hol_fail_body": "공휴일 서버에 연결하지 못했어요. 인터넷 연결을 확인하고 다시 불러와 주세요. 지금은 공휴일 없이 계산해요.",
         "nav_home": "홈",
         "nav_plan": "일정 잡기",
         "plan_title": "일정 잡기",
@@ -1610,6 +1646,7 @@
         "continue": "이어서 하기"
       },
       "en": {
+        "hol_fail_body": "Couldn’t reach the holiday service. Check your connection and try again. Holidays are ignored for now.",
         "nav_home": "Home",
         "nav_plan": "Schedule",
         "plan_title": "Schedule",
@@ -1703,6 +1740,7 @@
         "continue": "Continue"
       },
       "de": {
+        "hol_fail_body": "Der Feiertagsdienst ist nicht erreichbar. Bitte Verbindung prüfen und erneut laden. Feiertage werden vorerst ignoriert.",
         "nav_home": "Start",
         "nav_plan": "Planen",
         "plan_title": "Planen",
@@ -1797,6 +1835,7 @@
         "continue": "Fortsetzen"
       },
       "ja": {
+        "hol_fail_body": "祝日サーバーに接続できませんでした。接続を確認してもう一度お試しください。今は祝日なしで計算します。",
         "nav_home": "ホーム",
         "nav_plan": "日程調整",
         "plan_title": "日程調整",
